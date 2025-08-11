@@ -1,8 +1,7 @@
-streamlit
-websocket-client
-requests
-pandas
-streamlit-autorefresh
+streamlit>=1.28.0
+websocket-client>=1.6.0
+pandas>=1.5.0
+plotly>=5.15.0
 
 
 
