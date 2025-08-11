@@ -1,64 +1,94 @@
 import streamlit as st
 import pandas as pd
+import requests
 import threading
-import datetime
 import json
-from websocket import WebSocketApp
-from streamlit_autorefresh import st_autorefresh
+import datetime
+import websocket
 import altair as alt
 
-ASSETS = {
-    "Bitcoin (BTC)": "bitcoin"
-}
-WEBSOCKET_URL = "wss://ws.coincap.io/prices?assets={asset_id}"
-MAX_POINTS = 300
+st.set_page_config(page_title="Live Bitcoin Price", layout="centered")
 
 # Initialize session state
 if "price_history" not in st.session_state:
-    st.session_state.price_history = {asset_id: [] for asset_id in ASSETS.values()}
-if "ws_started" not in st.session_state:
-    st.session_state.ws_started = set()
+    st.session_state.price_history = {}
 
-def on_message(ws, message, asset_id):
-    try:
-        data = json.loads(message)
-        if asset_id in data:
-            price = float(data[asset_id])
-            ts = datetime.datetime.utcnow()
-            st.session_state.price_history[asset_id].append(
-                {"time": ts, "price": price}
-            )
-            if len(st.session_state.price_history[asset_id]) > MAX_POINTS:
-                st.session_state.price_history[asset_id] = st.session_state.price_history[asset_id][-MAX_POINTS:]
-    except Exception as e:
-        print(f"Error parsing message: {e}")
+if "ws_threads" not in st.session_state:
+    st.session_state.ws_threads = {}
 
-def start_ws(asset_id):
-    def run():
-        ws_url = WEBSOCKET_URL.format(asset_id=asset_id)
-        ws = WebSocketApp(ws_url, on_message=lambda ws, msg: on_message(ws, msg, asset_id))
-        ws.run_forever()
-    threading.Thread(target=run, daemon=True).start()
+# Asset options
+ASSETS = {
+    "bitcoin": "Bitcoin (BTC)",
+}
 
-st.set_page_config(page_title="Live Crypto Price", page_icon="📈")
-
-st.title("📈 Live crypto price")
+st.title("📈 Live crypto price (demo)")
 st.caption("Streaming live tick prices from CoinCap's WebSocket API.")
 
-asset_label = st.selectbox("Choose asset to track:", list(ASSETS.keys()))
-asset_id = ASSETS[asset_label]
+# Asset selection
+asset_id = st.selectbox("Choose asset to track:", list(ASSETS.keys()), format_func=lambda k: ASSETS[k])
+asset_label = ASSETS[asset_id]
 
-# Start WebSocket once
-if asset_id not in st.session_state.ws_started:
-    start_ws(asset_id)
-    st.session_state.ws_started.add(asset_id)
+# Ensure price list exists
+if asset_id not in st.session_state.price_history:
+    st.session_state.price_history[asset_id] = []
 
-st_autorefresh(interval=2000, key="crypto_refresh")
+# Function to seed price from REST API (one-time per asset to avoid 429)
+def seed_price_once(asset):
+    if st.session_state.price_history[asset]:
+        return  # already has data
 
-df = pd.DataFrame(st.session_state.price_history[asset_id]).sort_values("time")
+    try:
+        resp = requests.get(
+            f"https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": asset, "vs_currencies": "usd"},
+            timeout=5
+        )
+        resp.raise_for_status()
+        price = resp.json()[asset]["usd"]
+        st.session_state.price_history[asset].append({
+            "time": datetime.datetime.utcnow(),
+            "price": price
+        })
+    except Exception as e:
+        st.warning(f"⚠️ Could not seed price via REST: {e}")
+
+# WebSocket handling
+def start_ws_for_asset(asset):
+    if asset in st.session_state.ws_threads:
+        return
+
+    def on_message(ws, message):
+        data = json.loads(message)
+        price = float(data.get("priceUsd", 0))
+        if price > 0:
+            st.session_state.price_history[asset].append({
+                "time": datetime.datetime.utcnow(),
+                "price": price
+            })
+
+    def on_open(ws):
+        ws.send(json.dumps({"type": "subscribe", "symbol": asset}))
+
+    def run_ws():
+        ws_url = f"wss://ws.coincap.io/prices?assets={asset}"
+        ws = websocket.WebSocketApp(ws_url, on_message=on_message)
+        ws.run_forever()
+
+    t = threading.Thread(target=run_ws, daemon=True)
+    st.session_state.ws_threads[asset] = t
+    t.start()
+
+# Seed price once and start WebSocket
+seed_price_once(asset_id)
+start_ws_for_asset(asset_id)
+
+# Convert price history to DataFrame for plotting
+df = pd.DataFrame(st.session_state.price_history[asset_id])
 
 if not df.empty:
+    df = df.sort_values("time")
     latest_price = df["price"].iloc[-1]
+
     st.metric(f"{asset_label} — latest (USD)", f"${latest_price:,.2f}")
 
     chart = alt.Chart(df).mark_line().encode(
