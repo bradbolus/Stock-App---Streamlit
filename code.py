@@ -6,8 +6,12 @@ import json
 import datetime
 import websocket
 import altair as alt
+from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="Live Bitcoin Price", layout="centered")
+
+# Refresh every 2 seconds
+st_autorefresh(interval=2000, key="crypto_refresh")
 
 # Initialize session state
 if "price_history" not in st.session_state:
@@ -32,14 +36,13 @@ asset_label = ASSETS[asset_id]
 if asset_id not in st.session_state.price_history:
     st.session_state.price_history[asset_id] = []
 
-# Function to seed price from REST API (one-time per asset to avoid 429)
+# Seed from REST API only if empty
 def seed_price_once(asset):
     if st.session_state.price_history[asset]:
-        return  # already has data
-
+        return
     try:
         resp = requests.get(
-            f"https://api.coingecko.com/api/v3/simple/price",
+            "https://api.coingecko.com/api/v3/simple/price",
             params={"ids": asset, "vs_currencies": "usd"},
             timeout=5
         )
@@ -52,7 +55,7 @@ def seed_price_once(asset):
     except Exception as e:
         st.warning(f"⚠️ Could not seed price via REST: {e}")
 
-# WebSocket handling
+# WebSocket
 def start_ws_for_asset(asset):
     if asset in st.session_state.ws_threads:
         return
@@ -66,9 +69,6 @@ def start_ws_for_asset(asset):
                 "price": price
             })
 
-    def on_open(ws):
-        ws.send(json.dumps({"type": "subscribe", "symbol": asset}))
-
     def run_ws():
         ws_url = f"wss://ws.coincap.io/prices?assets={asset}"
         ws = websocket.WebSocketApp(ws_url, on_message=on_message)
@@ -78,11 +78,11 @@ def start_ws_for_asset(asset):
     st.session_state.ws_threads[asset] = t
     t.start()
 
-# Seed price once and start WebSocket
+# Start streaming
 seed_price_once(asset_id)
 start_ws_for_asset(asset_id)
 
-# Convert price history to DataFrame for plotting
+# Plot chart
 df = pd.DataFrame(st.session_state.price_history[asset_id])
 
 if not df.empty:
