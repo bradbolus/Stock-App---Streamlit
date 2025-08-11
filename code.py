@@ -35,15 +35,20 @@ def seed_price_once(asset_id: str):
         if GLOBAL_PRICE_HISTORY.get(asset_id):
             return
     try:
-        resp = requests.get(f"https://api.coincap.io/v2/assets/{asset_id}", timeout=5)
+        resp = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": asset_id, "vs_currencies": "usd"},
+            timeout=5
+        )
         resp.raise_for_status()
-        data = resp.json().get("data", {})
-        price = float(data.get("priceUsd"))
+        data = resp.json()
+        price = float(data[asset_id]["usd"])
         ts = datetime.datetime.utcnow()
         with GLOBAL_LOCK:
             GLOBAL_PRICE_HISTORY.setdefault(asset_id, []).append({"time": ts, "price": price})
     except Exception as e:
         st.write("⚠️ Could not seed price via REST:", e)
+
 
 def start_ws_for_asset(asset_id: str):
     if GLOBAL_THREADS.get(asset_id) and GLOBAL_THREADS[asset_id].is_alive():
