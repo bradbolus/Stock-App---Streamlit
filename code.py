@@ -6,6 +6,7 @@ import json
 from websocket import WebSocketApp
 from streamlit_autorefresh import st_autorefresh
 import random
+import altair as alt
 
 # ----------------------------
 # CONFIG
@@ -14,25 +15,27 @@ ASSETS = {
     "Bitcoin (BTC)": "bitcoin"
 }
 WEBSOCKET_URL = "wss://ws.coincap.io/prices?assets={asset_id}"
+MAX_POINTS = 300  # keep last N points in memory
 
 # ----------------------------
-# GLOBALS
+# INIT SESSION STATE
 # ----------------------------
-GLOBAL_PRICE_HISTORY = {}
-GLOBAL_WS_THREADS = {}
-GLOBAL_LOCK = threading.Lock()
+if "price_history" not in st.session_state:
+    st.session_state.price_history = {asset_id: [] for asset_id in ASSETS.values()}
+if "ws_threads" not in st.session_state:
+    st.session_state.ws_threads = {}
 
 # ----------------------------
 # FUNCTIONS
 # ----------------------------
 def seed_local_price(asset_id: str):
-    """Seed with a placeholder value so the chart isn't empty."""
-    with GLOBAL_LOCK:
-        if not GLOBAL_PRICE_HISTORY.get(asset_id):
-            # Just pick a random-looking number in BTC range for visual start
-            fake_price = round(random.uniform(25000, 30000), 2)
-            ts = datetime.datetime.utcnow()
-            GLOBAL_PRICE_HISTORY.setdefault(asset_id, []).append({"time": ts, "price": fake_price})
+    """Seed with a placeholder so the chart isn't empty."""
+    if not st.session_state.price_history[asset_id]:
+        fake_price = round(random.uniform(25000, 30000), 2)
+        ts = datetime.datetime.utcnow()
+        st.session_state.price_history[asset_id].append(
+            {"time": ts, "price": fake_price, "source": "placeholder"}
+        )
 
 def on_message(ws, message, asset_id):
     """Handle incoming WebSocket messages."""
@@ -41,14 +44,18 @@ def on_message(ws, message, asset_id):
         if asset_id in data:
             price = float(data[asset_id])
             ts = datetime.datetime.utcnow()
-            with GLOBAL_LOCK:
-                GLOBAL_PRICE_HISTORY.setdefault(asset_id, []).append({"time": ts, "price": price})
+            st.session_state.price_history[asset_id].append(
+                {"time": ts, "price": price, "source": "live"}
+            )
+            # Trim old points
+            if len(st.session_state.price_history[asset_id]) > MAX_POINTS:
+                st.session_state.price_history[asset_id] = st.session_state.price_history[asset_id][-MAX_POINTS:]
     except Exception as e:
         print(f"Error parsing message: {e}")
 
 def start_ws_for_asset(asset_id: str):
     """Start WebSocket listener in a background thread."""
-    if asset_id in GLOBAL_WS_THREADS:
+    if asset_id in st.session_state.ws_threads:
         return  # Already running
 
     def run_ws():
@@ -58,7 +65,7 @@ def start_ws_for_asset(asset_id: str):
 
     t = threading.Thread(target=run_ws, daemon=True)
     t.start()
-    GLOBAL_WS_THREADS[asset_id] = t
+    st.session_state.ws_threads[asset_id] = t
 
 # ----------------------------
 # STREAMLIT APP
@@ -71,25 +78,42 @@ st.caption("Streaming live tick prices from CoinCap's WebSocket API.")
 asset_label = st.selectbox("Choose asset to track:", list(ASSETS.keys()))
 asset_id = ASSETS[asset_label]
 
-# Seed with placeholder value
+# Seed placeholder
 seed_local_price(asset_id)
 
-# Start WebSocket thread
+# Start WebSocket
 start_ws_for_asset(asset_id)
 
 # Auto-refresh every 2 seconds
 st_autorefresh(interval=2000, key="crypto_refresh")
 
-# Retrieve history safely
-with GLOBAL_LOCK:
-    history = GLOBAL_PRICE_HISTORY.get(asset_id, []).copy()
+# Build dataframe
+df = pd.DataFrame(st.session_state.price_history[asset_id]).sort_values("time")
 
-df = pd.DataFrame(history)
-df = df.sort_values("time")
-
-# Display latest price
+# Show latest metric
 latest_price = df["price"].iloc[-1]
 st.metric(label=f"{asset_label} — latest (USD)", value=f"${latest_price:,.2f}")
 
-# Draw chart
-st.line_chart(df.set_index("time")["price"])
+# ----------------------------
+# Altair chart
+# ----------------------------
+base = alt.Chart(df).encode(
+    x=alt.X("time:T", title="Time"),
+    y=alt.Y("price:Q", title="Price (USD)")
+)
+
+# Live data line
+live_line = base.transform_filter(
+    alt.datum.source == "live"
+).mark_line(color="steelblue").encode()
+
+# Placeholder points (if any)
+placeholder_points = base.transform_filter(
+    alt.datum.source == "placeholder"
+).mark_point(color="lightgray", size=60, shape="circle").encode()
+
+chart = (live_line + placeholder_points).properties(
+    width=700, height=400
+)
+
+st.altair_chart(chart, use_container_width=True)
