@@ -1,5 +1,4 @@
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 import threading
 import time
 import json
@@ -11,24 +10,19 @@ from websocket import WebSocketApp
 # ---------- Configuration ----------
 ASSETS = {
     "Bitcoin (BTC)": "bitcoin",
-    # add more mappings here: "Label": "coincap-id"
 }
+REFRESH_SEC = 1
+HISTORY_MAX_POINTS = 1800
 
-REFRESH_MS = 1000  # frontend refresh interval (milliseconds)
-HISTORY_MAX_POINTS = 1800  # keep up to ~30 minutes at 1s if you like
-
-# ---------- Globals (in-memory) ----------
-GLOBAL_PRICE_HISTORY = {}     # { asset_id: [ {time: datetime, price: float}, ... ] }
-GLOBAL_THREADS = {}           # { asset_id: Thread }
+# ---------- Globals ----------
+GLOBAL_PRICE_HISTORY = {}
+GLOBAL_THREADS = {}
 GLOBAL_LOCK = threading.Lock()
 
-# ---------- Streamlit page setup ----------
+# ---------- Streamlit setup ----------
 st.set_page_config(page_title="Live BTC Tracker", layout="wide")
 st.title("📈 Live crypto price (demo)")
-st.markdown("This demo uses CoinCap's public WebSocket to stream live tick prices for Bitcoin.")
-
-# lightweight auto-refresh so the page re-runs and picks up new data without blocking
-_autorefresh_counter = st_autorefresh(interval=REFRESH_MS, limit=None, key="autorefresh")
+st.markdown("Streaming live tick prices for Bitcoin from CoinCap's websocket API.")
 
 selected_label = st.selectbox("Choose asset to track:", list(ASSETS.keys()))
 asset = ASSETS[selected_label]
@@ -36,9 +30,7 @@ asset = ASSETS[selected_label]
 col_metric, col_chart = st.columns([1, 4])
 
 # ---------- Helper functions ----------
-
 def seed_price_once(asset_id: str):
-    """Fetch a single price via REST to populate the UI immediately (only if empty)."""
     with GLOBAL_LOCK:
         if GLOBAL_PRICE_HISTORY.get(asset_id):
             return
@@ -51,15 +43,9 @@ def seed_price_once(asset_id: str):
         with GLOBAL_LOCK:
             GLOBAL_PRICE_HISTORY.setdefault(asset_id, []).append({"time": ts, "price": price})
     except Exception as e:
-        # don't crash the app for a seed failure
         st.write("⚠️ Could not seed price via REST:", e)
 
-
 def start_ws_for_asset(asset_id: str):
-    """Ensure a background websocket thread is running for the requested asset.
-
-    The thread will reconnect if the connection drops.
-    """
     if GLOBAL_THREADS.get(asset_id) and GLOBAL_THREADS[asset_id].is_alive():
         return
 
@@ -90,10 +76,12 @@ def start_ws_for_asset(asset_id: str):
     def run_ws_forever():
         while True:
             try:
-                ws = WebSocketApp(url,
-                                  on_message=make_on_message(asset_id),
-                                  on_error=on_error,
-                                  on_close=on_close)
+                ws = WebSocketApp(
+                    url,
+                    on_message=make_on_message(asset_id),
+                    on_error=on_error,
+                    on_close=on_close
+                )
                 ws.run_forever()
             except Exception as e:
                 print("WS run exception, reconnecting in 5s:", e)
@@ -103,50 +91,37 @@ def start_ws_for_asset(asset_id: str):
     GLOBAL_THREADS[asset_id] = t
     t.start()
 
-
 # ---------- Start/seed the data + WS thread ----------
 seed_price_once(asset)
 start_ws_for_asset(asset)
 
-# ---------- Build dataframe from in-memory buffer ----------
-with GLOBAL_LOCK:
-    hist = list(GLOBAL_PRICE_HISTORY.get(asset, []))
+# ---------- Live update loop ----------
+chart_placeholder = col_chart.empty()
+metric_placeholder = col_metric.empty()
 
-if hist:
-    df = pd.DataFrame(hist)
-    # ensure timezone-aware datetimes (assume stored UTC)
-    df["time"] = pd.to_datetime(df["time"], utc=True)
-    # convert to local timezone (Africa/Johannesburg) for display
-    try:
-        df["time_local"] = df["time"].dt.tz_convert("Africa/Johannesburg")
-    except Exception:
-        # fallback: keep UTC timestamps
-        df["time_local"] = df["time"]
-    df = df.set_index("time_local").sort_index()
-    latest_price = df["price"].iloc[-1]
-else:
-    df = pd.DataFrame(columns=["price"])
-    latest_price = None
-
-# ---------- UI ----------
-if latest_price is not None:
-    # show latest price
-    col_metric.metric(label=f"{selected_label} — latest (USD)", value=f"${latest_price:,.2f}")
-else:
-    col_metric.write("Connecting... (waiting for data)")
-
-# show chart
-if not df.empty:
-    col_chart.line_chart(df["price"], use_container_width=True)
-else:
-    col_chart.write("Waiting for first datapoint...")
-
-st.caption("Source: CoinCap websocket (wss://ws.coincap.io/prices) — REST seed via https://api.coincap.io/v2/assets/{id}")
-
-# Helpful debug / info for the user
-if st.checkbox("Show raw buffer (debug)"):
+while True:
     with GLOBAL_LOCK:
-        st.write(hist[-20:])
+        hist = list(GLOBAL_PRICE_HISTORY.get(asset, []))
 
-# END
+    if hist:
+        df = pd.DataFrame(hist)
+        df["time"] = pd.to_datetime(df["time"], utc=True)
+        try:
+            df["time_local"] = df["time"].dt.tz_convert("Africa/Johannesburg")
+        except Exception:
+            df["time_local"] = df["time"]
+        df = df.set_index("time_local").sort_index()
+        latest_price = df["price"].iloc[-1]
+
+        metric_placeholder.metric(
+            label=f"{selected_label} — latest (USD)",
+            value=f"${latest_price:,.2f}"
+        )
+        chart_placeholder.line_chart(df["price"], use_container_width=True)
+    else:
+        metric_placeholder.write("Connecting...")
+        chart_placeholder.write("Waiting for first datapoint...")
+
+    time.sleep(REFRESH_SEC)
+
 
