@@ -149,7 +149,7 @@ time_window = st.sidebar.selectbox(
 
 chart_style = st.sidebar.selectbox(
     "Chart Style", 
-    options=['line', 'area'],
+    options=['line', 'bar'],
     index=0
 )
 
@@ -239,26 +239,51 @@ if len(st.session_state.price_data) > 1:
     if filtered_data:
         df = pd.DataFrame(filtered_data)
         
+        # Calculate price changes for color coding
+        df['price_change'] = df['price'].diff()
+        df['color'] = df['price_change'].apply(
+            lambda x: '#00ff00' if x > 0 else '#ff0000' if x < 0 else '#f7931a'
+        )
+        
         # Create chart
         fig = go.Figure()
         
         if chart_style == 'line':
+            # Line chart with color-coded segments
+            for i in range(1, len(df)):
+                color = '#00ff00' if df.iloc[i]['price_change'] > 0 else '#ff0000' if df.iloc[i]['price_change'] < 0 else '#f7931a'
+                fig.add_trace(go.Scatter(
+                    x=df['timestamp'].iloc[i-1:i+1],
+                    y=df['price'].iloc[i-1:i+1],
+                    mode='lines',
+                    line=dict(color=color, width=3),
+                    showlegend=False,
+                    hovertemplate='<b>%{y:$,.2f}</b><br>%{x}<extra></extra>'
+                ))
+            
+            # Add markers for data points
             fig.add_trace(go.Scatter(
                 x=df['timestamp'],
                 y=df['price'],
-                mode='lines+markers',
-                name='BTC/USD',
-                line=dict(color='#f7931a', width=3),
-                marker=dict(size=4, color='#f7931a')
+                mode='markers',
+                marker=dict(size=6, color=df['color'], line=dict(width=1, color='white')),
+                showlegend=False,
+                hovertemplate='<b>%{y:$,.2f}</b><br>%{x}<extra></extra>'
             ))
-        elif chart_style == 'area':
-            fig.add_trace(go.Scatter(
+            
+        elif chart_style == 'bar':
+            # Bar chart with color coding based on price movement
+            fig.add_trace(go.Bar(
                 x=df['timestamp'],
                 y=df['price'],
-                fill='tonexty',
-                name='BTC/USD',
-                line=dict(color='#f7931a', width=2),
-                fillcolor='rgba(247, 147, 26, 0.3)'
+                marker=dict(
+                    color=df['color'],
+                    line=dict(width=1, color='white')
+                ),
+                name='BTC Price',
+                showlegend=False,
+                hovertemplate='<b>%{y:$,.2f}</b><br>%{x}<br><b>Change:</b> %{customdata:+.2f}<extra></extra>',
+                customdata=df['price_change'].fillna(0)
             ))
         
         # Update layout
@@ -272,7 +297,20 @@ if len(st.session_state.price_data) > 1:
             paper_bgcolor='rgba(0,0,0,0)',
             font=dict(color='white'),
             xaxis=dict(gridcolor='rgba(128,128,128,0.2)'),
-            yaxis=dict(gridcolor='rgba(128,128,128,0.2)')
+            yaxis=dict(gridcolor='rgba(128,128,128,0.2)'),
+            hovermode='x unified'
+        )
+        
+        # Add legend for colors
+        fig.add_annotation(
+            x=0.02, y=0.98,
+            xref="paper", yref="paper",
+            text="🟢 Price Up  🔴 Price Down  🟠 No Change",
+            showarrow=False,
+            font=dict(size=12, color="white"),
+            bgcolor="rgba(0,0,0,0.5)",
+            bordercolor="white",
+            borderwidth=1
         )
         
         st.plotly_chart(fig, use_container_width=True)
@@ -284,8 +322,17 @@ if len(st.session_state.price_data) > 1:
             recent_df['Time'] = recent_df['timestamp'].dt.strftime('%H:%M:%S')
             recent_df['Price (USD)'] = recent_df['price'].apply(lambda x: f"${x:,.2f}")
             
+            # Add price change column with colors
+            recent_df['Change'] = recent_df['price'].diff().fillna(0)
+            recent_df['Change ($)'] = recent_df['Change'].apply(
+                lambda x: f"+${x:.2f}" if x > 0 else f"${x:.2f}" if x < 0 else "$0.00"
+            )
+            recent_df['Trend'] = recent_df['Change'].apply(
+                lambda x: "🟢 ↗" if x > 0 else "🔴 ↘" if x < 0 else "🟠 →"
+            )
+            
             st.dataframe(
-                recent_df[['Time', 'Price (USD)']],
+                recent_df[['Time', 'Price (USD)', 'Change ($)', 'Trend']],
                 use_container_width=True,
                 hide_index=True
             )
